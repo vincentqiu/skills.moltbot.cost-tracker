@@ -1,111 +1,161 @@
 ---
 name: clawdbot-cost-tracker
-description: Track Clawdbot AI model usage and estimate costs. Use when reporting daily/weekly costs, analyzing token usage across sessions, or monitoring AI spending. Supports Claude (opus/sonnet), GPT, and Codex models.
+description: Track Clawdbot AI model usage and costs accurately. Use when reporting daily/weekly costs, analyzing spending, or monitoring AI usage. Reads actual API cost data from session JSONL files.
 ---
 
 # Clawdbot Cost Tracker
 
-Track token usage and estimate API costs across all Clawdbot sessions.
+Track **accurate** API costs from Clawdbot session data.
 
-## Quick Start
+## ⚠️ Important: Data Source
 
-### Get Current Usage
+**DO NOT use `sessions_list` totalTokens for cost tracking!**
 
-```bash
-# Use sessions_list to get token data
-sessions_list --limit 20 --messageLimit 0
+The `totalTokens` field in `sessions_list` represents the **current context window size**, not cumulative usage. It resets after each compaction.
+
+### ✅ Correct Data Source
+
+Session JSONL files contain actual API usage with **real cost data** (in USD):
+
+```
+~/.clawdbot/agents/main/sessions/*.jsonl
 ```
 
-Extract `totalTokens` and `model` from each session.
-
-### Calculate Cost
-
-Model pricing (USD per million tokens):
-
-| Model | Input | Output | Avg Ratio |
-|-------|-------|--------|-----------|
-| claude-opus-4-5 | $15 | $75 | 30/70 |
-| claude-sonnet-4 | $3 | $15 | 30/70 |
-| codex-mini-latest | $1 | $5 | 30/70 |
-| gpt-4o | $2.5 | $10 | 30/70 |
-| gpt-4o-mini | $0.15 | $0.6 | 30/70 |
-
-Cost formula (assuming 30% input, 70% output):
-```
-cost = tokens * (0.3 * input_price + 0.7 * output_price) / 1,000,000
-```
-
-## Daily Tracking
-
-### Save Usage Snapshot
-
-Store daily snapshots in `memory/usage/YYYY-MM-DD.json`:
-
+Each API call logs a `usage` object with precise costs:
 ```json
 {
-  "date": "2026-01-29",
-  "timestamp": "2026-01-29T08:20:00+08:00",
-  "sessions": {
-    "session_key": {
-      "model": "claude-opus-4-5",
-      "totalTokens": 123456,
-      "channel": "discord"
-    }
-  },
-  "summary": {
-    "totalTokens": 250000,
-    "byModel": {
-      "claude-opus-4-5": 220000,
-      "codex-mini-latest": 30000
+  "usage": {
+    "input": 288,
+    "output": 646,
+    "cacheRead": 8576,
+    "cacheWrite": 0,
+    "totalTokens": 9510,
+    "cost": {
+      "input": 0.000432,
+      "output": 0.003876,
+      "cacheRead": 0.003216,
+      "cacheWrite": 0,
+      "total": 0.007524
     }
   }
 }
 ```
 
-### Calculate Daily Cost
+## Quick Start
 
-Compare consecutive days to get daily usage:
+### Get All Daily Costs
+
+```bash
+cd ~/.clawdbot/agents/main/sessions && \
+for f in *.jsonl; do
+  grep -o '"timestamp":"[^"]*".*"total":[0-9.]*' "$f" 2>/dev/null | \
+  sed 's/.*"timestamp":"\([^T]*\)T.*"total":\([0-9.]*\).*/\1 \2/' 
+done | awk '{date=$1; cost=$2; sum[date]+=cost} END {for(d in sum) printf "%s $%.2f\n", d, sum[d]}' | sort
 ```
-daily_tokens = today.totalTokens - yesterday.totalTokens
-daily_cost = estimate_cost(daily_tokens, model)
+
+### Get Yesterday's Cost
+
+```bash
+YESTERDAY=$(date -v-1d +%Y-%m-%d)  # macOS
+# YESTERDAY=$(date -d "yesterday" +%Y-%m-%d)  # Linux
+
+cd ~/.clawdbot/agents/main/sessions && \
+for f in *.jsonl; do
+  grep -o '"timestamp":"'$YESTERDAY'[^"]*".*"total":[0-9.]*' "$f" 2>/dev/null | \
+  grep -o '"total":[0-9.]*' | cut -d: -f2
+done | awk '{sum+=$1} END {printf "$%.2f\n", sum}'
+```
+
+### Get Total Lifetime Cost
+
+```bash
+cd ~/.clawdbot/agents/main/sessions && \
+for f in *.jsonl; do
+  grep -o '"total":[0-9.]*' "$f" 2>/dev/null | cut -d: -f2
+done | awk '{sum+=$1} END {printf "$%.2f\n", sum}'
+```
+
+### Get Cost by Model (Advanced)
+
+```bash
+# Use the bundled script
+bash {baseDir}/scripts/extract-cost.sh --by-model
 ```
 
 ## Scripts
 
-### `scripts/snapshot-usage.js`
+### `scripts/extract-cost.sh`
 
-Creates a usage snapshot from current session data.
+Extract actual costs from JSONL files.
 
 ```bash
-node scripts/snapshot-usage.js [output-dir]
-# Default output: memory/usage/YYYY-MM-DD.json
+# Daily costs
+bash scripts/extract-cost.sh
+
+# Yesterday only
+bash scripts/extract-cost.sh --yesterday
+
+# Specific date
+bash scripts/extract-cost.sh --date 2026-01-30
+
+# This week
+bash scripts/extract-cost.sh --week
+
+# JSON output
+bash scripts/extract-cost.sh --json
 ```
 
-### `scripts/calculate-cost.js`
+### `scripts/snapshot-usage.js` (Legacy)
 
-Calculates cost for a date range.
+⚠️ **Deprecated** - Uses inaccurate token-based estimation.
 
+If you need token counts (not costs), this still works:
 ```bash
-node scripts/calculate-cost.js [date]
-# Default: today
-# Output: JSON with token delta and estimated cost
+# Pipe sessions_list JSON to the script
+cat sessions.json | node scripts/snapshot-usage.js
 ```
 
 ## Integration with Daily Report
 
-Add to HEARTBEAT.md:
-1. Call `sessions_list` to get current tokens
-2. Load previous day's snapshot from `memory/usage/`
-3. Calculate delta and estimate cost
-4. Include in daily report format:
-   ```
-   💰 **Clawdbot Cost** (yesterday)
-   • Used: 45.2k tokens
-   • Estimated: ~$1.23
-   ```
+Add to your HEARTBEAT.md:
+
+```markdown
+### 费用追踪
+
+获取昨日费用：
+\`\`\`bash
+bash /path/to/skills/clawdbot-cost-tracker/scripts/extract-cost.sh --yesterday
+\`\`\`
+
+展示格式：
+💰 昨日费用: $XX.XX
+📊 本周累计: $XXX.XX
+```
+
+## Data Storage (Optional)
+
+Save daily snapshots for historical tracking:
+
+```bash
+# Create snapshot with actual costs
+DATE=$(date +%Y-%m-%d)
+bash scripts/extract-cost.sh --json > memory/usage/$DATE.json
+```
+
+## Pricing Reference
+
+The costs in JSONL are **actual API charges** (USD), already calculated by the provider.
+
+For reference, current pricing (per million tokens):
+
+| Model | Input | Output | Cache Read | Cache Write |
+|-------|-------|--------|------------|-------------|
+| claude-opus-4-5 | $15 | $75 | $1.50 | $18.75 |
+| claude-sonnet-4 | $3 | $15 | $0.30 | $3.75 |
+| codex-mini-latest | $1.50 | $6 | $0.15 | $1.88 |
 
 ## Color Conventions (Chinese Style)
 
 For financial displays in Chinese context:
-- 🔴 Red = Up/Increase
-- 🟢 Green = Down/Decrease
+- 🔴 Red = Up/Increase (涨)
+- 🟢 Green = Down/Decrease (跌)
